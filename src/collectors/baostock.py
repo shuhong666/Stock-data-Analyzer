@@ -46,45 +46,62 @@ class BaostockCollector:
 
     def logout(self):
         if self._logged_in:
-            bs.logout()
+            try:
+                bs.logout()
+            except Exception:
+                pass
             self._logged_in = False
             logger.info("Baostock 登出")
 
+    def _force_reconnect(self):
+        """强制重置连接：登出 + 等待 + 登入"""
+        try:
+            self.logout()
+        except Exception:
+            pass
+        self._logged_in = False
+        time.sleep(BAOSTOCK_RECONNECT_GAP)
+        return self._ensure_login()
+
     def _ensure_login(self):
-        """确保登录，失败自动重连"""
+        """确保登录，失败自动重试（指数退避）"""
         for attempt in range(BAOSTOCK_RETRY_COUNT):
             try:
                 self.login()
                 return True
             except Exception as e:
-                logger.warning(f"Baostock 登录失败 (第 {attempt+1} 次): {e}")
+                wait = BAOSTOCK_RETRY_INTERVAL * (2 ** attempt)
+                logger.warning(f"Baostock 登录失败 (第 {attempt+1} 次): {e}, 等待 {wait}s")
                 if attempt < BAOSTOCK_RETRY_COUNT - 1:
-                    time.sleep(BAOSTOCK_RECONNECT_GAP)
+                    time.sleep(wait)
         return False
 
     def _safe_query(self, func, *args, **kwargs):
-        """带自动重连的安全查询，网络断开时强制重登"""
+        """带指数退避自动重连的安全查询"""
         for attempt in range(BAOSTOCK_RETRY_COUNT):
             try:
                 if not self._logged_in:
-                    if not self._ensure_login():
-                        logger.warning("Baostock 重登失败，等待后重试")
-                        time.sleep(BAOSTOCK_RECONNECT_GAP)
+                    if not self._force_reconnect():
+                        wait = BAOSTOCK_RECONNECT_GAP * (2 ** attempt)
+                        logger.warning(f"Baostock 重登失败, 等待 {wait}s")
+                        time.sleep(wait)
                         continue
                 rs = func(*args, **kwargs)
                 if rs.error_code != "0":
                     raise Exception(rs.error_msg)
                 return rs
-            except Exception as e:
-                logger.warning(f"Baostock 查询失败 (第 {attempt+1} 次): {e}")
-                # 强制重置连接
-                try:
-                    self.logout()
-                except Exception:
-                    pass
+            except (ConnectionError, TimeoutError, OSError) as e:
+                # 网络层错误：强制重连 + 指数退避
+                wait = BAOSTOCK_RECONNECT_GAP * (2 ** attempt)
+                logger.warning(f"Baostock 网络错误 (第 {attempt+1} 次): {e}, 等待 {wait}s")
                 self._logged_in = False
+                time.sleep(wait)
+            except Exception as e:
+                # 业务层错误（error_code 非 0 等）
+                wait = BAOSTOCK_RETRY_INTERVAL * (2 ** attempt)
+                logger.warning(f"Baostock 查询失败 (第 {attempt+1} 次): {e}, 等待 {wait}s")
                 if attempt < BAOSTOCK_RETRY_COUNT - 1:
-                    time.sleep(BAOSTOCK_RECONNECT_GAP)
+                    time.sleep(wait)
         return None
 
     # ------------------------------------------------------------------
@@ -426,13 +443,12 @@ class BaostockCollector:
 
         consecutive_fails = 0
         skipped = 0
+        backoff_level = 0
         for i, code in enumerate(codes):
             # 已有数据则跳过
             existing = self.db.fetchone("SELECT COUNT(*) AS c FROM adjust_factor WHERE code = ?", (code,))
             if existing and existing["c"] > 0:
                 skipped += 1
-                if (i + 1) % 500 == 0:
-                    logger.info(f"复权因子进度: {i+1}/{total} (跳过 {skipped})")
                 continue
 
             try:
@@ -440,24 +456,25 @@ class BaostockCollector:
                 new_count = len(self.db.fetchall("SELECT COUNT(*) AS c FROM adjust_factor WHERE code = ?", (code,)))
                 if new_count > 0:
                     consecutive_fails = 0
+                    backoff_level = 0
                 else:
                     consecutive_fails += 1
             except Exception as e:
                 logger.error(f"复权因子拉取失败 {code}: {e}")
                 consecutive_fails += 1
-            time.sleep(BAOSTOCK_REQUEST_GAP)
 
-            # 连续 50 次失败 → 强制重连
-            if consecutive_fails >= 50:
-                logger.warning(f"连续 {consecutive_fails} 次失败，强制重连...")
-                try:
-                    self.logout()
-                except Exception:
-                    pass
-                self._logged_in = False
-                time.sleep(BAOSTOCK_RECONNECT_GAP)
-                self._ensure_login()
-                consecutive_fails = 0
+            # 指数退避：每 10 次连续失败增加等待时间
+            if consecutive_fails > 0 and consecutive_fails % 10 == 0:
+                backoff_level += 1
+                wait = min(BAOSTOCK_RECONNECT_GAP * (2 ** backoff_level), 120)
+                logger.warning(
+                    f"连续 {consecutive_fails} 次失败，"
+                    f"等待 {wait}s 后强制重连..."
+                )
+                time.sleep(wait)
+                self._force_reconnect()
+            else:
+                time.sleep(BAOSTOCK_REQUEST_GAP)
 
             if (i + 1) % 100 == 0:
-                logger.info(f"复权因子进度: {i+1}/{total}")
+                logger.info(f"复权因子进度: {i+1}/{total} ({skipped} 跳过, {consecutive_fails} 连续失败)")
