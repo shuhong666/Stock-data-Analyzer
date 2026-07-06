@@ -76,7 +76,7 @@ stock_basic (股票基础信息)
     │       └── monthly_kline (月K线，从日K聚合)
     │
     ├── adjust_factor (复权因子)
-    ├── industry_class (申万一级行业分类)
+    ├── industry_class (证监会行业分类)
     ├── financial_summary (财务摘要，按需)
     ├── performance_express (业绩快报，按需)
     ├── index_constituent (指数成分股，按需)
@@ -147,7 +147,7 @@ stock_basic (股票基础信息)
 |:---|:---|:---|
 | `code` | TEXT PK (复合) | 股票代码 |
 | `level` | TEXT PK (复合) | `一级` |
-| `industry` | TEXT | 申万行业名称 |
+| `industry` | TEXT | 证监会行业名称 |
 | `updated_at` | TEXT | 更新时间 |
 
 #### financial_summary（同花顺，按需拉取）
@@ -404,7 +404,7 @@ class BaostockCollector:
     def __init__(self, db: Database, config: Config)
     def backfill_daily(self, code: str, start_date: str, end_date: str) -> int
     def backfill_all_daily(self, start_date: str) -> None       # 断点续跑
-    def fetch_industry(self) -> None                              # 申万一级行业
+    def fetch_industry(self) -> None                              # 证监会行业分类
     def fetch_adjust_factors(self, code: str) -> None
     def fetch_trade_calendar(self) -> None
     def init_stock_basic(self) -> None                            # 初始化股票池
