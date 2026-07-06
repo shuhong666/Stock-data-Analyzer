@@ -63,21 +63,28 @@ class BaostockCollector:
         return False
 
     def _safe_query(self, func, *args, **kwargs):
-        """带自动重连的安全查询"""
+        """带自动重连的安全查询，网络断开时强制重登"""
         for attempt in range(BAOSTOCK_RETRY_COUNT):
             try:
                 if not self._logged_in:
-                    self._ensure_login()
+                    if not self._ensure_login():
+                        logger.warning("Baostock 重登失败，等待后重试")
+                        time.sleep(BAOSTOCK_RECONNECT_GAP)
+                        continue
                 rs = func(*args, **kwargs)
                 if rs.error_code != "0":
                     raise Exception(rs.error_msg)
                 return rs
             except Exception as e:
                 logger.warning(f"Baostock 查询失败 (第 {attempt+1} 次): {e}")
+                # 强制重置连接
+                try:
+                    self.logout()
+                except Exception:
+                    pass
                 self._logged_in = False
                 if attempt < BAOSTOCK_RETRY_COUNT - 1:
-                    time.sleep(BAOSTOCK_RETRY_INTERVAL)
-                    self._ensure_login()
+                    time.sleep(BAOSTOCK_RECONNECT_GAP)
         return None
 
     # ------------------------------------------------------------------
@@ -412,16 +419,45 @@ class BaostockCollector:
             )
 
     def fetch_all_adjust_factors(self, start_date: str = "1990-01-01"):
-        """拉取全部股票复权因子"""
+        """拉取全部股票复权因子（已存在的跳过）"""
         codes = self.db.get_active_stock_codes()
         total = len(codes)
         logger.info(f"开始拉取复权因子，共 {total} 只")
 
+        consecutive_fails = 0
+        skipped = 0
         for i, code in enumerate(codes):
+            # 已有数据则跳过
+            existing = self.db.fetchone("SELECT COUNT(*) AS c FROM adjust_factor WHERE code = ?", (code,))
+            if existing and existing["c"] > 0:
+                skipped += 1
+                if (i + 1) % 500 == 0:
+                    logger.info(f"复权因子进度: {i+1}/{total} (跳过 {skipped})")
+                continue
+
             try:
                 self.fetch_adjust_factors(code, start_date)
+                new_count = len(self.db.fetchall("SELECT COUNT(*) AS c FROM adjust_factor WHERE code = ?", (code,)))
+                if new_count > 0:
+                    consecutive_fails = 0
+                else:
+                    consecutive_fails += 1
             except Exception as e:
                 logger.error(f"复权因子拉取失败 {code}: {e}")
+                consecutive_fails += 1
             time.sleep(BAOSTOCK_REQUEST_GAP)
+
+            # 连续 50 次失败 → 强制重连
+            if consecutive_fails >= 50:
+                logger.warning(f"连续 {consecutive_fails} 次失败，强制重连...")
+                try:
+                    self.logout()
+                except Exception:
+                    pass
+                self._logged_in = False
+                time.sleep(BAOSTOCK_RECONNECT_GAP)
+                self._ensure_login()
+                consecutive_fails = 0
+
             if (i + 1) % 100 == 0:
                 logger.info(f"复权因子进度: {i+1}/{total}")

@@ -20,71 +20,52 @@ logger = logging.getLogger(__name__)
 
 
 def aggregate_weekly_kline(db: Database):
-    """从 daily_kline 聚合周K线（存周期首日=周一）"""
-    sql = """
-        INSERT OR REPLACE INTO weekly_kline (
-            code, trade_date, open, high, low, close, preclose,
-            volume, amount, turn, pct_chg, pe_ttm, pb_mrq,
-            ps_ttm, pcf_ttm, total_mv, circ_mv, amplitude,
-            vol_ratio, avg_price, limit_up, limit_down, is_st,
-            data_source, updated_at
-        )
-        SELECT
-            code,
-            date(trade_date, 'weekday 1', '-7 days') AS week_start,
-            FIRST_VALUE(open) OVER w AS open,
-            MAX(high) OVER w AS high,
-            MIN(low) OVER w AS low,
-            FIRST_VALUE(close) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS close,
-            FIRST_VALUE(preclose) OVER w AS preclose,
-            SUM(volume) OVER w AS volume,
-            SUM(amount) OVER w AS amount,
-            SUM(turn) OVER w AS turn,
-            NULL AS pct_chg,
-            FIRST_VALUE(pe_ttm) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS pe_ttm,
-            FIRST_VALUE(pb_mrq) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS pb_mrq,
-            FIRST_VALUE(ps_ttm) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS ps_ttm,
-            FIRST_VALUE(pcf_ttm) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS pcf_ttm,
-            FIRST_VALUE(total_mv) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS total_mv,
-            FIRST_VALUE(circ_mv) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS circ_mv,
-            FIRST_VALUE(amplitude) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS amplitude,
-            FIRST_VALUE(vol_ratio) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS vol_ratio,
-            FIRST_VALUE(avg_price) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS avg_price,
-            FIRST_VALUE(limit_up) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS limit_up,
-            FIRST_VALUE(limit_down) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS limit_down,
-            FIRST_VALUE(is_st) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS is_st,
-            'aggregated',
-            datetime('now')
-        FROM daily_kline
-        WHERE trade_date IS NOT NULL
-        WINDOW w AS (PARTITION BY code, strftime('%Y-%W', trade_date) ORDER BY trade_date)
+    """从 daily_kline 聚合周K线（存周期首日=周一）
+
+    采用两阶段聚合避免子查询中的 MIN/MAX 冲突：
+    1. 先查出每组的首日/末日
+    2. 再 JOIN 回 daily_kline 取 OHLCV
     """
-    # 上面的窗口函数思路在 SQLite 中实现较复杂，
-    # 这里使用简化方案：按 code + week 分组聚合
-    simple_sql = """
+    sql = """
         INSERT OR REPLACE INTO weekly_kline (
             code, trade_date, open, high, low, close, preclose,
             volume, amount, data_source, updated_at
         )
         SELECT
-            code,
-            MIN(trade_date) AS week_start,
-            (SELECT d2.open FROM daily_kline d2 WHERE d2.code = d.code AND d2.trade_date = MIN(d.trade_date)) AS open,
-            MAX(high),
-            MIN(low),
-            (SELECT d3.close FROM daily_kline d3 WHERE d3.code = d.code AND d3.trade_date = MAX(d.trade_date)) AS close,
-            (SELECT d4.preclose FROM daily_kline d4 WHERE d4.code = d.code AND d4.trade_date = MIN(d.trade_date)) AS preclose,
-            SUM(volume),
-            SUM(amount),
+            g.code,
+            g.week_start,
+            d_open.open,
+            g.high,
+            g.low,
+            d_close.close,
+            d_open.preclose,
+            g.volume,
+            g.amount,
             'aggregated',
             datetime('now')
-        FROM daily_kline d
-        WHERE trade_date IS NOT NULL
-        GROUP BY code, strftime('%Y-%W', trade_date)
+        FROM (
+            SELECT
+                code,
+                MIN(trade_date) AS week_start,
+                MAX(trade_date) AS week_end,
+                SUM(volume) AS volume,
+                SUM(amount) AS amount,
+                MAX(high) AS high,
+                MIN(low) AS low
+            FROM daily_kline
+            WHERE trade_date IS NOT NULL
+            GROUP BY code, strftime('%Y-%W', trade_date)
+        ) g
+        LEFT JOIN daily_kline d_open
+            ON d_open.code = g.code AND d_open.trade_date = g.week_start
+        LEFT JOIN daily_kline d_close
+            ON d_close.code = g.code AND d_close.trade_date = g.week_end
     """
-    db.execute(simple_sql)
-    count = len(db.fetchall("SELECT COUNT(*) AS c FROM weekly_kline"))
-    logger.info(f"周K聚合完成，共 {count} 条（估）")
+    db.execute(sql)
+    cur = db.conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM weekly_kline")
+    count = cur.fetchone()[0]
+    logger.info(f"周K聚合完成，共 {count} 条")
 
 
 def aggregate_monthly_kline(db: Database):
@@ -95,20 +76,34 @@ def aggregate_monthly_kline(db: Database):
             volume, amount, data_source, updated_at
         )
         SELECT
-            code,
-            MIN(trade_date) AS month_start,
-            (SELECT d2.open FROM daily_kline d2 WHERE d2.code = d.code AND d2.trade_date = MIN(d.trade_date)) AS open,
-            MAX(high),
-            MIN(low),
-            (SELECT d3.close FROM daily_kline d3 WHERE d3.code = d.code AND d3.trade_date = MAX(d.trade_date)) AS close,
-            (SELECT d4.preclose FROM daily_kline d4 WHERE d4.code = d.code AND d4.trade_date = MIN(d.trade_date)) AS preclose,
-            SUM(volume),
-            SUM(amount),
+            g.code,
+            g.month_start,
+            d_open.open,
+            g.high,
+            g.low,
+            d_close.close,
+            d_open.preclose,
+            g.volume,
+            g.amount,
             'aggregated',
             datetime('now')
-        FROM daily_kline d
-        WHERE trade_date IS NOT NULL
-        GROUP BY code, strftime('%Y-%m', trade_date)
+        FROM (
+            SELECT
+                code,
+                MIN(trade_date) AS month_start,
+                MAX(trade_date) AS month_end,
+                SUM(volume) AS volume,
+                SUM(amount) AS amount,
+                MAX(high) AS high,
+                MIN(low) AS low
+            FROM daily_kline
+            WHERE trade_date IS NOT NULL
+            GROUP BY code, strftime('%Y-%m', trade_date)
+        ) g
+        LEFT JOIN daily_kline d_open
+            ON d_open.code = g.code AND d_open.trade_date = g.month_start
+        LEFT JOIN daily_kline d_close
+            ON d_close.code = g.code AND d_close.trade_date = g.month_end
     """
     db.execute(sql)
     logger.info("月K聚合完成")
