@@ -280,15 +280,27 @@ class TencentSnapshot:
         logger.info(f"快照采集启动: {total} 只股票, {len(batches)} 批/轮, {SNAPSHOT_INTERVAL}s 间隔")
         self._running = True
 
-        while not self._stop_event.is_set():
-            # 检查是否在交易时段
-            if not self.calendar.is_trading_day():
-                logger.info("非交易日，快照采集退出")
-                break
+        # 非交易日直接退出
+        if not self.calendar.is_trading_day():
+            logger.info("非交易日，快照采集退出")
+            self._running = False
+            return
 
+        while not self._stop_event.is_set():
+            # 检查交易时段
             if not self.calendar.is_trading_session():
-                logger.info("已退出交易时段（11:30 或 15:00 后最后一轮已完成），快照采集退出")
-                break
+                # 不在交易时段：判断是等待还是退出
+                next_open = self.calendar.next_open_time()
+                if next_open is None:
+                    # 当天没有更多交易时段（已过 15:00 或非交易日）
+                    logger.info("今日交易时段已结束，快照采集退出")
+                    break
+                else:
+                    wait_sec = (next_open - datetime.now()).total_seconds()
+                    if wait_sec > 0:
+                        logger.info(f"等待开盘: {next_open.strftime('%H:%M:%S')} ({wait_sec:.0f}s)")
+                        self._stop_event.wait(wait_sec)
+                        continue
 
             round_start = time.time()
             total_snapshots = 0
