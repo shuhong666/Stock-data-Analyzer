@@ -47,7 +47,7 @@ VALIDATE_DEFAULT_DAYS = 5              # 默认校验最近 N 个交易日
 # ============================================================
 # 日志
 # ============================================================
-LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
+LOG_DIR = "logs"
 LOG_FILE_LEVEL = "WARNING"
 LOG_CONSOLE_LEVEL = "INFO"
 LOG_RETENTION_DAYS = 30
