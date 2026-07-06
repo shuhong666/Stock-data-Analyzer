@@ -27,7 +27,8 @@ Thumbs.db
 # Jupyter
 .ipynb_checkpoints/
 
-# Data files (uncomment if needed)
-# data/
-# *.csv
-# *.parquet
+# Data files
+data/
+*.db
+*.parquet
+*.csv
