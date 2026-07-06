@@ -341,7 +341,7 @@ class BaostockCollector:
     # ------------------------------------------------------------------
 
     def fetch_industry(self):
-        """拉取申万一级行业分类"""
+        """拉取行业分类（Baostock 提供的是证监会行业分类）"""
         self._ensure_login()
         rs = self._safe_query(bs.query_stock_industry)
         if rs is None:
@@ -352,13 +352,17 @@ class BaostockCollector:
         rows = []
         while rs.next():
             row = rs.get_row_data()
-            code = row[0]
+            # fields: updateDate, code, code_name, industry, industryClassification
+            code = row[1]
             if not (code.startswith("sh.60") or code.startswith("sz.00")):
+                continue
+            industry_name = row[3] if row[3] else ""
+            if not industry_name:
                 continue
             rows.append({
                 "code": code,
                 "level": "一级",
-                "industry": row[2],  # 申万一级行业
+                "industry": industry_name,
                 "updated_at": now,
             })
 
@@ -373,8 +377,6 @@ class BaostockCollector:
     # 复权因子
     # ------------------------------------------------------------------
 
-    AVG_ADJUST_FIELDS = "date,code,avg_adjfactor,avg_adjfactor_after"
-
     def fetch_adjust_factors(self, code: str, start_date: str = "1990-01-01",
                              end_date: str = None):
         """拉取单只股票复权因子"""
@@ -385,7 +387,6 @@ class BaostockCollector:
         rs = self._safe_query(
             bs.query_adjust_factor,
             code,
-            self.AVG_ADJUST_FIELDS,
             start_date=start_date,
             end_date=end_date,
         )
@@ -395,11 +396,12 @@ class BaostockCollector:
         rows = []
         while rs.next():
             row = rs.get_row_data()
+            # fields: code, dividOperateDate, foreAdjustFactor, backAdjustFactor, adjustFactor
             rows.append({
                 "code": code,
-                "trade_date": row[0],
-                "adj_factor": float(row[2]) if row[2] else None,
-                "adj_factor_after": float(row[3]) if row[3] else None,
+                "trade_date": row[1],          # dividOperateDate
+                "adj_factor": float(row[4]) if row[4] else None,        # adjustFactor
+                "adj_factor_after": float(row[3]) if row[3] else None,  # backAdjustFactor
             })
 
         if rows:
