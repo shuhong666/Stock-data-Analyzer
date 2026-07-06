@@ -50,23 +50,29 @@ class Database:
             cur.close()
 
     def execute(self, sql: str, params=None):
+        """执行写操作，返回受影响行数"""
         with self.cursor() as cur:
             cur.execute(sql, params or [])
-            return cur
+            return cur.rowcount
 
     def executemany(self, sql: str, seq):
+        """批量执行写操作"""
         with self.cursor() as cur:
             cur.executemany(sql, seq)
-            return cur
+            return cur.rowcount
 
     def fetchall(self, sql: str, params=None) -> list[dict]:
-        cur = self.execute(sql, params)
-        return [dict(row) for row in cur.fetchall()]
+        """查询并返回全部结果"""
+        with self.cursor() as cur:
+            cur.execute(sql, params or [])
+            return [dict(row) for row in cur.fetchall()]
 
     def fetchone(self, sql: str, params=None) -> dict | None:
-        cur = self.execute(sql, params)
-        row = cur.fetchone()
-        return dict(row) if row else None
+        """查询并返回单条结果"""
+        with self.cursor() as cur:
+            cur.execute(sql, params or [])
+            row = cur.fetchone()
+            return dict(row) if row else None
 
     # ================================================================
     # 建表
