@@ -32,3 +32,9 @@ data/
 *.db
 *.parquet
 *.csv
+
+# Strategy docs (local only)
+docs/pullback_features.md
+docs/strategy_iteration_v5.md
+docs/external_strategies.md
+memory/
