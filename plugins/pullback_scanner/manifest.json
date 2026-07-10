@@ -1,0 +1,12 @@
+{
+    "name": "pullback_scanner",
+    "version": "1.0.0",
+    "label": "Pullback Scanner",
+    "description": "Scan all stocks for current pullback opportunities with probability scoring and fundamental checks",
+    "author": "",
+    "menu": {
+        "group": "Analysis"
+    },
+    "permissions": ["read_data"],
+    "depends": []
+}

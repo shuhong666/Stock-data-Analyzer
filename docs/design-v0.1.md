@@ -1,6 +1,6 @@
 # Stock V0.1 — 数据采集系统设计文档
 
-> 版本: V0.1 | 日期: 2026-07-06 | 状态: 待确认
+> 版本: V0.2 | 日期: 2026-07-10 | 状态: 已确认，迭代中
 
 ---
 
@@ -14,13 +14,18 @@
 
 | 数据源 | 采集内容 | 用途 |
 |:---|:---|:---|
-| **Tencent** `qt.gtimg.cn` | 盘中实时快照（30s/轮） | 实时日K更新、盘中监控 |
-| **Baostock** | 日/周/月K线（不复权）、行业分类、复权因子、交易日历 | 历史数据、补全、校准 |
+| **Tencent** `qt.gtimg.cn` | 盘中实时快照（30s/轮）含指数 | 实时日K更新、盘中监控 |
+| **Baostock** | 日/周/月K线（不复权, adjustflag=3）、行业分类、复权因子（含前复权累计因子）、交易日历、**指数日K** | 历史数据、补全、校准 |
 | **Akshare** | 财务摘要（同花顺）、业绩快报（东方财富）、指数成分股（中证） | 基本面分析、成分筛选 |
 
-### 1.3 股票范围
+### 1.3 数据范围
 
-上证主板（60xxxx）+ 深证主板（00xxxx），约 3000 只。
+- **个股**: 上证主板（60xxxx）+ 深证主板（00xxxx），约 3000 只
+- **指数**: 上证综指(`sh.000001`)、沪深300(`sh.000300`)、深证成指(`sz.399001`)、创业板指(`sz.399006`)
+  - 历史日K通过 Baostock 拉取（`scripts/fetch_index.py`）
+  - 盘中实时数据通过 Tencent 快照同步更新（代码转换: `sh.000001` → `s_sh000001`）
+  - 指数数据存入 `daily_kline` 表，`stock_basic.board='index'` 区分
+  - 用途: V6 策略市场环境过滤（沪深300 < MA60 时交易）
 
 ---
 
@@ -44,21 +49,26 @@ stock_V0.1/
 │   │   ├── __init__.py
 │   │   ├── calendar.py          # 交易日历
 │   │   └── runner.py            # 快照主循环
+│   ├── server/                  # V0.2 Web Server + 插件系统
+│   │   └── plugin_mgr/
+│   │       └── indicators.py    # 技术指标库 + 复权工具
 │   └── validate.py              # 数据校验（daily_kline vs Baostock）
-├── scripts/                     # 入口脚本（开发用）
+├── scripts/                     # 入口脚本
 │   ├── snapshot.py              # 启动盘中快照
 │   ├── backfill.py              # Baostock 补全日K
+│   ├── fetch_index.py           # 拉取指数日K + 注册到 stock_basic
 │   ├── validate.py              # 触发数据校验
-│   └── init_db.py               # 初始化数据库
-├── data/                        # 本地数据（不入 git）
-│   ├── stock.db                 # SQLite 数据库
-│   └── archive/                 # 快照归档 Parquet 文件
-├── logs/                        # 日志文件（不入 git）
+│   ├── init_db.py               # 初始化数据库
+│   ├── init_full.py             # 全量初始化
+│   ├── backtest_strategy.py     # V6 策略回测
+│   └── ...                      # 更多分析/研究脚本
 ├── docs/                        # 文档
-│   └── design-v0.1.md
-├── requirements.txt
-├── .gitignore
-└── README.md
+│   ├── design-v0.1.md           # 数据采集系统设计
+│   ├── pullback_features.md     # 策略特征手册（10个视角）
+│   ├── strategy_iteration_v5.md # V5/V6 迭代记录
+│   └── external_strategies.md   # 外部策略参考
+├── plugins/                     # 策略插件
+│   └── fake_breakdown_reversal/ # 假摔反转 V6
 ```
 
 ---
@@ -93,7 +103,7 @@ stock_basic (股票基础信息)
 | `name` | TEXT | 股票名称 |
 | `ipo_date` | TEXT | 上市日期 YYYY-MM-DD |
 | `delist_date` | TEXT | 退市日期，NULL=正常交易 |
-| `board` | TEXT | 板块：`sh_main` / `sz_main` |
+| `board` | TEXT | 板块：`sh_main` / `sz_main` / `index` |
 | `updated_at` | TEXT | 最后更新时间 |
 
 #### daily_kline
@@ -138,8 +148,14 @@ stock_basic (股票基础信息)
 |:---|:---|:---|
 | `code` | TEXT PK (复合) | 股票代码 |
 | `trade_date` | TEXT PK (复合) | 交易日期 |
-| `adj_factor` | REAL | 复权因子 |
-| `adj_factor_after` | REAL | 后复权因子 |
+| `adj_factor` | REAL | 本次复权因子 (Baostock adjustFactor) |
+| `adj_factor_after` | REAL | 后复权累计因子 (Baostock backAdjustFactor) |
+| `fore_factor` | REAL | 前复权累计因子 (Baostock foreAdjustFactor)，**已是累计值** |
+
+> **复权公式**: Baostock `adjustflag="3"` 拉取的是**不复权**数据。  
+> 前复权价格 = 不复权价格 × 最近一条 `event_date ≤ 当前日期` 的 `fore_factor`。  
+> `fore_factor` 本身已是累计值（包含此前所有除权），直接乘即可，不需要累乘。  
+> 调用入口: `indicators.forward_adjust(close, high, low, open_, dates, adj_factors)`
 
 #### industry_class
 
@@ -448,13 +464,14 @@ def validate_daily_kline(
 | 校验报告格式 | 纯日志文件 |
 | 股票代码格式 | `sh.600000` / `sz.000001`（存储层带前缀，UI 层去前缀） |
 | 快照与 Baostock 分工 | 快照更新 18 个字段（见 4.1）；ps_ttm / pcf_ttm / is_st 仅由 Baostock 提供 |
+| 复权策略 | daily_kline 存不复权价；指标计算时按需调用 `forward_adjust()` 转前复权。Baostock foreAdjustFactor 已是累计值，直接取 `≤ 当前日期的最新一条` 乘即可 |
 
 ---
 
 ## 8. 不在 V0.1 范围内
 
-- 前复权/后复权 K 线的自动生成（复权因子已存，计算交由上层策略模块）
 - 分钟线 / 5 分钟线
 - 策略回测框架
-- Web UI / 前端展示
 - 自动交易 / 信号推送
+
+> **已移交**: 前复权计算已封装为 `indicators.forward_adjust()`，根据复权因子表将不复权 OHLC 转为前复权。指标按需调用（MA/MACD/RSI 等需复权，量比/筹码等不需）。

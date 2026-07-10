@@ -1,0 +1,12 @@
+{
+    "name": "fake_breakdown_reversal",
+    "version": "1.0.0",
+    "label": "假摔反转",
+    "description": "基于V3策略: 前期充分调整+抛压枯竭+区间中高位的假摔反弹捕捉。含买入筛选/持仓管理/卖出提醒。",
+    "author": "",
+    "menu": {
+        "group": "Analysis"
+    },
+    "permissions": ["read_data"],
+    "depends": []
+}
